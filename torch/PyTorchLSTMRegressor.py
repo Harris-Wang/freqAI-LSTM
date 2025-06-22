@@ -1,6 +1,7 @@
-from typing import Dict, Any
+from typing import Dict, Any, Tuple
 
 import torch
+from pandas import DataFrame
 
 from freqtrade.freqai.base_models.BasePyTorchRegressor import BasePyTorchRegressor
 from freqtrade.freqai.data_kitchen import FreqaiDataKitchen
@@ -43,7 +44,8 @@ class PyTorchLSTMRegressor(BasePyTorchRegressor):
 
     def fit(self, data_dictionary: Dict, dk: FreqaiDataKitchen, **kwargs) -> Any:
         n_features = data_dictionary["train_features"].shape[-1]
-        model = PyTorchLSTMModel(input_dim=n_features, output_dim=1, **self.model_kwargs)
+        n_targets = data_dictionary["train_labels"].shape[-1]
+        model = PyTorchLSTMModel(input_dim=n_features, output_dim=n_targets, **self.model_kwargs)
         model.to(self.device)
         optimizer = torch.optim.AdamW(model.parameters(), lr=self.learning_rate)
         criterion = torch.nn.MSELoss(reduction='mean')
@@ -62,4 +64,42 @@ class PyTorchLSTMRegressor(BasePyTorchRegressor):
         trainer.fit(data_dictionary, self.splits)
         self.model = trainer
         return trainer
+
+    def predict(
+        self, unfiltered_df: DataFrame, dk: FreqaiDataKitchen, **kwargs
+    ) -> Tuple[DataFrame, DataFrame]:
+        """
+        Filter the prediction features data and predict with it.
+        :param unfiltered_df: Full dataframe for the current backtest period.
+        :return:
+        :pred_df: dataframe containing the predictions
+        :do_predict: np.array of 1s and 0s to indicate places where freqai needed to remove
+                     data (NaNs) or felt uncertain about data (PCA and DI index)
+        """
+        from pandas import DataFrame
+        import torch
+        
+        filtered_df, _ = dk.filter_features(
+            unfiltered_df, dk.training_features_list, training_filter=False
+        )
+        filtered_df = dk.feature_pipeline.transform(filtered_df)
+        dk.data_dictionary["prediction_features"] = filtered_df
+
+        self.data_convertor.convert_data_for_inference(dk.data_dictionary, dk.pair)
+        with torch.no_grad():
+            self.model.model.eval()
+            y = self.model.model(
+                self.data_convertor.x_test
+            )
+        
+        # 处理多目标输出的列名
+        if y.shape[1] == len(dk.label_list):
+            # 多目标情况：使用所有标签列名
+            pred_df = DataFrame(y.detach().tolist(), columns=dk.label_list)
+        else:
+            # 单目标情况：只使用第一个标签列名
+            pred_df = DataFrame(y.detach().tolist(), columns=[dk.label_list[0]])
+        
+        pred_df, _, _ = dk.label_pipeline.inverse_transform(pred_df)
+        return pred_df, dk.do_predict
 
