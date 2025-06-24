@@ -1,5 +1,6 @@
 from typing import Dict, Any, Tuple
 
+import numpy as np
 import torch
 from pandas import DataFrame
 
@@ -85,12 +86,27 @@ class PyTorchLSTMRegressor(BasePyTorchRegressor):
         filtered_df = dk.feature_pipeline.transform(filtered_df)
         dk.data_dictionary["prediction_features"] = filtered_df
 
-        self.data_convertor.convert_data_for_inference(dk.data_dictionary, dk.pair)
+        # 准备输入数据
+        sequence_length = self.freqai_info.get("conv_width", 10)
+        prediction_features = dk.data_dictionary["prediction_features"].values
+        num_rows = prediction_features.shape[0]
+        
+        # 创建序列输入数据
+        if num_rows >= sequence_length:
+            input_data = np.array([prediction_features[i:i + sequence_length]
+                                   for i in range(num_rows - sequence_length + 1)])
+        else:
+            # 如果数据不足，用零填充
+            padded_data = np.zeros((sequence_length, prediction_features.shape[1]))
+            padded_data[:num_rows] = prediction_features
+            input_data = np.array([padded_data])
+        
+        # 转换为tensor
+        input_tensor = torch.tensor(input_data, dtype=torch.float32).to(self.device)
+        
         with torch.no_grad():
             self.model.model.eval()
-            y = self.model.model(
-                self.data_convertor.x_test
-            )
+            y = self.model.model(input_tensor)
         
         # 处理多目标输出的列名
         if y.shape[1] == len(dk.label_list):
